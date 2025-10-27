@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: nessus-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: nessus_data
+      MYSQL_USER: ${MYSQL_USER:-grafana}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-grafana123}
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  nessus-importer:
+    build:
+      context: .
+    container_name: nessus-importer
+    environment:
+      # Nessus
+      NESSUS_URL: ${NESSUS_URL}
+      NESSUS_ACCESS_KEY: ${NESSUS_ACCESS_KEY}
+      NESSUS_SECRET_KEY: ${NESSUS_SECRET_KEY}
+      NESSUS_VERIFY_SSL: ${NESSUS_VERIFY_SSL:-false}
+
+      # MySQL
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_USER:-grafana}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-grafana123}
+      MYSQL_DB: nessus_data
+
+      # Worker
+      BACKFILL_ON_START: ${BACKFILL_ON_START:-true}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-600}  # 10 phút
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
