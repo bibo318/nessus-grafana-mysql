@@ -11,7 +11,7 @@ from nessus_client import NessusClient
 from db import (
     db_conn, init_schema_from_file, upsert_scan, upsert_processed_history,
     already_processed, import_hosts, import_plugins_and_findings, insert_cves_for_finding,
-    import_host_findings
+    import_host_findings, upsert_host_record
 )
 
 # Basic logging
@@ -124,9 +124,12 @@ def process_one_history(nc: NessusClient, scan_id: int, history_id: int):
 
             host_vuln_outputs.append((hv, outputs))
 
-        if host_vuln_outputs:
-            with db_conn() as cn:
+        with db_conn() as cn:
+            upsert_host_record(cn, scan_id, history_id, host_summary)
+            if host_vuln_outputs:
                 import_host_findings(cn, scan_id, history_id, host_summary, host_vuln_outputs)
+            else:
+                cn.commit()
 
     log.info(f"Finished scan_id={scan_id}, history_id={history_id}")
 
