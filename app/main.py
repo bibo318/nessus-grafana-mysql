@@ -10,7 +10,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from nessus_client import NessusClient
 from db import (
     db_conn, init_schema_from_file, upsert_scan, upsert_processed_history,
-    already_processed, import_hosts, import_plugins_and_findings, insert_cves_for_finding
+    already_processed, import_hosts, import_plugins_and_findings, insert_cves_for_finding,
+    import_host_findings
 )
 
 # Basic logging
@@ -28,6 +29,15 @@ def list_histories(scan_json):
 def process_one_history(nc: NessusClient, scan_id: int, history_id: int):
     log.info(f"Processing scan_id={scan_id}, history_id={history_id}")
     scan_json = nc.get_scan(scan_id, history_id=history_id)
+
+    # Bảo đảm danh sách hosts đầy đủ nếu API scan mặc định giới hạn
+    try:
+        paginated_hosts = nc.list_scan_hosts(scan_id, history_id=history_id)
+        if paginated_hosts:
+            scan_json = dict(scan_json)
+            scan_json["hosts"] = paginated_hosts
+    except Exception:
+        log.debug("Không thể tải danh sách hosts đầy đủ, sử dụng dữ liệu trong scan JSON.", exc_info=True)
 
     # Determine status
     status = "unknown"
@@ -54,7 +64,14 @@ def process_one_history(nc: NessusClient, scan_id: int, history_id: int):
         import_hosts(cn, scan_id, history_id, scan_json)
 
     # 3. Save plugin findings
-    vulnerabilities = scan_json.get("vulnerabilities", []) or []
+    try:
+        vulnerabilities = nc.list_scan_vulnerabilities(scan_id, history_id=history_id)
+        if not vulnerabilities:
+            vulnerabilities = scan_json.get("vulnerabilities", []) or []
+    except Exception:
+        log.exception("Không thể tải danh sách vulnerabilities đầy đủ, sử dụng dữ liệu trong scan JSON.")
+        vulnerabilities = scan_json.get("vulnerabilities", []) or []
+
     with db_conn() as cn:
         import_plugins_and_findings(cn, scan_id, history_id, vulnerabilities)
 
@@ -67,6 +84,49 @@ def process_one_history(nc: NessusClient, scan_id: int, history_id: int):
                 insert_cves_for_finding(
                     cn, (scan_id, history_id, plugin_id, ""), cves
                 )
+
+    # 5. Save host-level plugin outputs
+    hosts = scan_json.get("hosts", []) or []
+    for host in hosts:
+        host_id = host.get("host_id")
+        if host_id is None:
+            continue
+
+        try:
+            host_detail = nc.get_host_details(scan_id, host_id, history_id=history_id)
+        except Exception:
+            log.exception(f"Không thể lấy chi tiết host {host_id} cho scan {scan_id}.")
+            continue
+
+        host_summary = dict(host)
+        info = host_detail.get("info") if isinstance(host_detail, dict) else None
+        if isinstance(info, dict):
+            hostname = info.get("hostname") or info.get("name")
+            if hostname:
+                host_summary["hostname"] = hostname
+
+        host_vulns = host_detail.get("vulnerabilities", []) if isinstance(host_detail, dict) else []
+        host_vulns = host_vulns or []
+        host_vuln_outputs = []
+
+        for hv in host_vulns:
+            plugin_id = hv.get("plugin_id")
+            if not plugin_id:
+                continue
+
+            try:
+                outputs = nc.get_host_plugin_outputs(scan_id, host_id, int(plugin_id), history_id=history_id)
+            except Exception:
+                log.exception(
+                    f"Không thể tải plugin outputs cho scan={scan_id}, host={host_id}, plugin={plugin_id}"
+                )
+                outputs = []
+
+            host_vuln_outputs.append((hv, outputs))
+
+        if host_vuln_outputs:
+            with db_conn() as cn:
+                import_host_findings(cn, scan_id, history_id, host_summary, host_vuln_outputs)
 
     log.info(f"Finished scan_id={scan_id}, history_id={history_id}")
 
