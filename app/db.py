@@ -1,4 +1,5 @@
 import os
+import hashlib
 import mysql.connector
 from contextlib import contextmanager
 
@@ -83,12 +84,17 @@ def import_hosts(cn, scan_id, history_id, scan_json):
 def import_plugins_and_findings(cn, scan_id, history_id, vuln_items):
     cur = cn.cursor()
     for v in vuln_items:
-        plugin_id = int(v.get("plugin_id"))
+        plugin_id = v.get("plugin_id")
+        if plugin_id is None:
+            continue
+        plugin_id = int(plugin_id)
         plugin_name = v.get("plugin_name") or ""
         plugin_family = v.get("plugin_family") or ""
         severity = int(v.get("severity", 0))
         count = int(v.get("count", 0))
         cpe = v.get("cpe")
+        if isinstance(cpe, list):
+            cpe = ",".join(filter(None, map(str, cpe)))
         vpr = v.get("vpr_score")
         epss = v.get("epss_score")
         offline = 1 if v.get("offline") else 0
@@ -138,5 +144,91 @@ def insert_cves_for_finding(cn, finding_key_tuple, cve_list):
           INSERT IGNORE INTO finding_cves (finding_id, cve_id)
           VALUES (%s, %s)
         """, (finding_id, cve))
+    cn.commit()
+
+
+def import_host_findings(cn, scan_id, history_id, host_summary, host_vuln_outputs):
+    """Persist chi tiết plugin theo host.
+
+    host_vuln_outputs: iterable các tuple (vuln_dict, outputs_list)
+    """
+    cur = cn.cursor()
+    host_id = host_summary.get("host_id")
+    hostname = host_summary.get("hostname") or host_summary.get("host")
+
+    for vuln, outputs in host_vuln_outputs:
+        plugin_id = vuln.get("plugin_id")
+        if plugin_id is None:
+            continue
+        plugin_id = int(plugin_id)
+        severity = int(vuln.get("severity", 0))
+        outputs = outputs or []
+        count = int(vuln.get("count") or 0)
+        if not count:
+            count = len(outputs)
+
+        # Aggregate finding cho host cụ thể (hostname != NULL)
+        cur.execute("""
+            INSERT INTO findings (scan_id, history_id, plugin_id, hostname, severity, count, cpe, vpr_score, epss_score, offline)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON DUPLICATE KEY UPDATE
+              severity=VALUES(severity), count=VALUES(count)
+        """, (scan_id, history_id, plugin_id, hostname, severity, count, None, None, None, 0))
+
+        if not outputs:
+            continue
+
+        for detail in outputs:
+            port = detail.get("port")
+            protocol = detail.get("protocol")
+            svc_name = detail.get("svc_name")
+            state = detail.get("state")
+            plugin_output = detail.get("plugin_output") or ""
+            severity_override = detail.get("severity")
+            first_found = detail.get("first_found")
+            last_found = detail.get("last_found")
+
+            severity_for_record = severity_override if severity_override is not None else severity
+
+            hash_source = "|".join(
+                str(x) for x in (
+                    scan_id,
+                    history_id,
+                    host_id,
+                    plugin_id,
+                    port,
+                    protocol or "",
+                    svc_name or "",
+                    plugin_output
+                )
+            )
+            output_hash = hashlib.sha1(hash_source.encode("utf-8", errors="ignore")).hexdigest()
+
+            cur.execute("""
+                INSERT INTO host_findings (
+                  scan_id, history_id, host_id, hostname, plugin_id, port, protocol,
+                  svc_name, severity, state, output_hash, plugin_output, first_found, last_found
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON DUPLICATE KEY UPDATE
+                  severity=VALUES(severity), state=VALUES(state), plugin_output=VALUES(plugin_output),
+                  first_found=VALUES(first_found), last_found=VALUES(last_found)
+            """, (
+                scan_id,
+                history_id,
+                host_id,
+                hostname,
+                plugin_id,
+                port,
+                protocol,
+                svc_name,
+                severity_for_record,
+                state,
+                output_hash,
+                plugin_output,
+                first_found,
+                last_found,
+            ))
+
     cn.commit()
 
