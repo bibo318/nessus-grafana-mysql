@@ -79,3 +79,25 @@ CREATE TABLE IF NOT EXISTS finding_cves (
   CONSTRAINT fk_fc_finding FOREIGN KEY (finding_id) REFERENCES findings(id) ON DELETE CASCADE,
   CONSTRAINT fk_fc_cve FOREIGN KEY (cve_id) REFERENCES cves(cve_id) ON DELETE RESTRICT
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS host_findings (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  scan_id INT NOT NULL,
+  history_id INT NOT NULL,
+  host_id INT,
+  hostname VARCHAR(255),
+  plugin_id INT NOT NULL,
+  port INT,
+  protocol VARCHAR(16),
+  svc_name VARCHAR(128),
+  severity INT,
+  state VARCHAR(32),
+  output_hash CHAR(40) NOT NULL,
+  plugin_output LONGTEXT,
+  first_found BIGINT,
+  last_found BIGINT,
+
+  UNIQUE KEY uq_host_finding (scan_id, history_id, host_id, plugin_id, port, protocol, output_hash),
+  KEY idx_host (scan_id, history_id, host_id),
+  CONSTRAINT fk_host_finding_plugin FOREIGN KEY (plugin_id) REFERENCES plugins(plugin_id)
+) ENGINE=InnoDB;
