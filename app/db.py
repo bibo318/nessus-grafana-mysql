@@ -2,6 +2,7 @@ import os
 import hashlib
 import mysql.connector
 from contextlib import contextmanager
+from typing import Iterable, Optional, Any
 
 MYSQL_HOST = os.getenv("MYSQL_HOST", "mysql")
 MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
@@ -66,19 +67,96 @@ def already_processed(cn, scan_id, history_id):
     cur.execute("SELECT 1 FROM processed_history WHERE scan_id=%s AND history_id=%s LIMIT 1", (scan_id, history_id))
     return cur.fetchone() is not None
 
-def import_hosts(cn, scan_id, history_id, scan_json):
+def _first_present(values: Iterable[Any]) -> Optional[Any]:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            candidate = value.strip()
+            if not candidate:
+                continue
+            return candidate
+        return value
+    return None
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int,)):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+
+def _extract_count(host: dict, *keys: str) -> int:
+    for key in keys:
+        if key in host:
+            return _coerce_int(host.get(key))
+    return 0
+
+
+def upsert_host_record(cn, scan_id: int, history_id: int, host: dict):
+    """Insert/update a single host entry with normalised fields."""
+    if not isinstance(host, dict):
+        return
+
+    host_id_raw = _first_present((host.get("host_id"), host.get("id")))
+    if host_id_raw is None:
+        return
+
+    try:
+        host_id = int(host_id_raw)
+    except (TypeError, ValueError):
+        return
+
+    hostname = _first_present(
+        (
+            host.get("hostname"),
+            host.get("host"),
+            host.get("name"),
+            host.get("fqdn"),
+            host.get("ipaddress"),
+            host.get("ip_address"),
+        )
+    )
+
+    critical = _extract_count(host, "critical", "critical_count", "severity_critical")
+    high = _extract_count(host, "high", "high_count", "severity_high")
+    medium = _extract_count(host, "medium", "medium_count", "severity_medium")
+    low = _extract_count(host, "low", "low_count", "severity_low")
+    info = _extract_count(host, "info", "info_count", "severity_info", "informational", "informational_count")
+
     cur = cn.cursor()
-    for h in scan_json.get("hosts", []):
-        cur.execute("""
-            INSERT INTO hosts (scan_id, history_id, host_id, hostname, critical, high, medium, low, info)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            ON DUPLICATE KEY UPDATE
-              hostname=VALUES(hostname), critical=VALUES(critical), high=VALUES(high),
-              medium=VALUES(medium), low=VALUES(low), info=VALUES(info)
-        """, (
-            scan_id, history_id, h.get("host_id"), h.get("hostname"),
-            h.get("critical",0), h.get("high",0), h.get("medium",0), h.get("low",0), h.get("info",0)
-        ))
+    cur.execute("""
+        INSERT INTO hosts (scan_id, history_id, host_id, hostname, critical, high, medium, low, info)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON DUPLICATE KEY UPDATE
+          hostname=VALUES(hostname), critical=VALUES(critical), high=VALUES(high),
+          medium=VALUES(medium), low=VALUES(low), info=VALUES(info)
+    """, (
+        scan_id,
+        history_id,
+        host_id,
+        hostname,
+        critical,
+        high,
+        medium,
+        low,
+        info,
+    ))
+
+
+def import_hosts(cn, scan_id, history_id, scan_json):
+    for h in scan_json.get("hosts", []) or []:
+        upsert_host_record(cn, scan_id, history_id, h)
     cn.commit()
 
 def import_plugins_and_findings(cn, scan_id, history_id, vuln_items):
