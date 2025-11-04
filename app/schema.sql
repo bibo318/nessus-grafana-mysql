@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS hosts (
   history_id INT NOT NULL,
   host_id INT NOT NULL,
   hostname VARCHAR(255),
+  ip_address VARCHAR(255),
+  operating_system VARCHAR(255),
   critical INT DEFAULT 0,
   high INT DEFAULT 0,
   medium INT DEFAULT 0,
@@ -41,7 +43,23 @@ CREATE TABLE IF NOT EXISTS hosts (
 CREATE TABLE IF NOT EXISTS plugins (
   plugin_id INT PRIMARY KEY,
   plugin_name VARCHAR(255),
-  plugin_family VARCHAR(255)
+  plugin_family VARCHAR(255),
+  plugin_type VARCHAR(64),
+  plugin_version VARCHAR(64),
+  risk_factor VARCHAR(32),
+  synopsis TEXT,
+  description LONGTEXT,
+  solution LONGTEXT,
+  see_also TEXT,
+  plugin_publication_date BIGINT,
+  plugin_modification_date BIGINT,
+  vulnerability_publication_date BIGINT,
+  cwe TEXT,
+  cvss2_base_score DECIMAL(4,1),
+  cvss2_vector VARCHAR(128),
+  cvss3_base_score DECIMAL(4,1),
+  cvss3_vector VARCHAR(128),
+  vpr_drivers TEXT
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS findings (

@@ -104,6 +104,23 @@ def process_one_history(nc: NessusClient, scan_id: int, history_id: int):
             hostname = info.get("hostname") or info.get("name")
             if hostname:
                 host_summary["hostname"] = hostname
+            ip_address = (
+                info.get("host-ip")
+                or info.get("ip")
+                or info.get("ip_address")
+                or info.get("ipaddress")
+            )
+            if ip_address:
+                host_summary["ip_address"] = ip_address
+                host_summary["ip"] = ip_address
+            operating_system = (
+                info.get("operating-system")
+                or info.get("operating_system")
+                or info.get("os")
+            )
+            if operating_system:
+                host_summary["operating_system"] = operating_system
+                host_summary["operating-system"] = operating_system
 
         host_vulns = host_detail.get("vulnerabilities", []) if isinstance(host_detail, dict) else []
         host_vulns = host_vulns or []

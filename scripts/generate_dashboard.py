@@ -7,15 +7,17 @@ from typing import Any, Dict, List
 DS_UID = "${DS_MYSQL_NESSUS}"
 PLUGIN_VERSION = "11.2.0"
 
-HOST_FILTER = "'$__all' IN (${host:sqlstring}) OR h.hostname IN (${host:sqlstring})"
+HOST_NAME_FILTER = "'$__all' IN (${host:sqlstring}) OR h.hostname IN (${host:sqlstring}) OR h.ip_address IN (${host:sqlstring})"
+HOST_IP_FILTER = "'$__all' IN (${ip:sqlstring}) OR h.ip_address IN (${ip:sqlstring})"
+HOST_OS_FILTER = "'$__all' IN (${os_filter:sqlstring}) OR h.operating_system IN (${os_filter:sqlstring})"
 CATEGORY_HOSTS = """'${phan_loai}' = 'tatca'\n    OR EXISTS (\n      SELECT 1\n      FROM findings f_loc\n      JOIN plugins p_loc ON p_loc.plugin_id = f_loc.plugin_id\n      WHERE f_loc.scan_id = h.scan_id\n        AND f_loc.history_id = h.history_id\n        AND (f_loc.hostname <=> h.hostname)\n        AND (\n          ('${phan_loai}' = 'web' AND (p_loc.plugin_family LIKE '%Web%' OR p_loc.plugin_family LIKE '%CGI%' OR p_loc.plugin_family LIKE '%HTTP%' OR p_loc.plugin_family LIKE '%WWW%'))\n          OR ('${phan_loai}' = 'os' AND (p_loc.plugin_family LIKE '%Windows%' OR p_loc.plugin_family LIKE '%Unix%' OR p_loc.plugin_family LIKE '%Linux%' OR p_loc.plugin_family LIKE '%Operating System%' OR p_loc.plugin_family LIKE '%OS%'))\n        )\n    )"""
 
 PLUGINS_CATEGORY = """'${phan_loai}' = 'tatca'\n    OR ( '${phan_loai}' = 'web' AND (p.plugin_family LIKE '%Web%' OR p.plugin_family LIKE '%CGI%' OR p.plugin_family LIKE '%HTTP%' OR p.plugin_family LIKE '%WWW%') )\n    OR ( '${phan_loai}' = 'os' AND (p.plugin_family LIKE '%Windows%' OR p.plugin_family LIKE '%Unix%' OR p.plugin_family LIKE '%Linux%' OR p.plugin_family LIKE '%Operating System%' OR p.plugin_family LIKE '%OS%') )"""
 
-FINDINGS_HOST_FILTER = "'$__all' IN (${host:sqlstring}) OR f.hostname IN (${host:sqlstring}) OR (f.hostname IS NULL AND '$__all' IN (${host:sqlstring}))"
-HOST_FINDINGS_FILTER = "'$__all' IN (${host:sqlstring}) OR hf.hostname IN (${host:sqlstring})"
+FINDINGS_HOST_FILTER = "EXISTS (SELECT 1 FROM filtered_hosts fh WHERE fh.scan_id = f.scan_id AND fh.history_id = f.history_id AND (f.hostname IS NULL OR f.hostname = fh.hostname))"
+HOST_FINDINGS_FILTER = "EXISTS (SELECT 1 FROM filtered_hosts fh WHERE fh.scan_id = hf.scan_id AND fh.history_id = hf.history_id AND (hf.host_id = fh.host_id OR (hf.hostname IS NOT NULL AND hf.hostname = fh.hostname)))"
 
-HOSTS_CTE = """WITH filtered_hosts AS (\n    SELECT *\n    FROM hosts h\n    WHERE h.scan_id = ${scan:raw}\n      AND h.history_id = ${history:raw}\n      AND ({HOST_FILTER})\n      AND (\n        {CATEGORY_HOSTS}\n      )\n)\n""".replace('{HOST_FILTER}', HOST_FILTER).replace('{CATEGORY_HOSTS}', CATEGORY_HOSTS)
+HOSTS_CTE = """WITH filtered_hosts AS (\n    SELECT *\n    FROM hosts h\n    WHERE h.scan_id = ${scan:raw}\n      AND h.history_id = ${history:raw}\n      AND ({HOST_NAME_FILTER})\n      AND ({HOST_IP_FILTER})\n      AND ({HOST_OS_FILTER})\n      AND (\n        {CATEGORY_HOSTS}\n      )\n)\n""".replace('{HOST_NAME_FILTER}', HOST_NAME_FILTER).replace('{HOST_IP_FILTER}', HOST_IP_FILTER).replace('{HOST_OS_FILTER}', HOST_OS_FILTER).replace('{CATEGORY_HOSTS}', CATEGORY_HOSTS)
 
 
 def hosts_query(body: str) -> str:
@@ -23,11 +25,11 @@ def hosts_query(body: str) -> str:
 
 
 def host_findings_query(body: str) -> str:
-    return body.replace('{host_findings_filter}', HOST_FINDINGS_FILTER).replace('{plugins_category}', PLUGINS_CATEGORY)
+    return (HOSTS_CTE + body).replace('{host_findings_filter}', HOST_FINDINGS_FILTER).replace('{plugins_category}', PLUGINS_CATEGORY)
 
 
 def findings_query(body: str) -> str:
-    return body.replace('{findings_host_filter}', FINDINGS_HOST_FILTER).replace('{plugins_category}', PLUGINS_CATEGORY)
+    return (HOSTS_CTE + body).replace('{findings_host_filter}', FINDINGS_HOST_FILTER).replace('{plugins_category}', PLUGINS_CATEGORY)
 
 
 def datasource() -> Dict[str, str]:
@@ -426,6 +428,14 @@ def host_table() -> Dict[str, Any]:
                     "properties": [{"id": "custom.width", "value": 220}]
                 },
                 {
+                    "matcher": {"id": "byName", "options": "ip_address"},
+                    "properties": [{"id": "custom.width", "value": 150}]
+                },
+                {
+                    "matcher": {"id": "byName", "options": "operating_system"},
+                    "properties": [{"id": "custom.width", "value": 220}]
+                },
+                {
                     "matcher": {"id": "byName", "options": "tong_lo_hong"},
                     "properties": [
                         {"id": "custom.cellOptions", "value": {"mode": "color-background", "type": "color-background"}},
@@ -451,7 +461,7 @@ def host_table() -> Dict[str, Any]:
             {
                 "datasource": datasource(),
                 "format": "table",
-                "rawSql": hosts_query("SELECT hostname, critical, high, medium, low, info, (critical + high + medium + low + info) AS tong_lo_hong\nFROM filtered_hosts\nORDER BY tong_lo_hong DESC\nLIMIT 200;"),
+                "rawSql": hosts_query("SELECT hostname, ip_address, operating_system, critical, high, medium, low, info, (critical + high + medium + low + info) AS tong_lo_hong\nFROM filtered_hosts\nORDER BY tong_lo_hong DESC\nLIMIT 200;"),
                 "refId": "A"
             }
         ],
@@ -598,7 +608,9 @@ def host_findings_table() -> Dict[str, Any]:
             },
             "overrides": [
                 {"matcher": {"id": "byName", "options": "plugin_output"}, "properties": [{"id": "custom.width", "value": 500}]},
-                {"matcher": {"id": "byName", "options": "hostname"}, "properties": [{"id": "custom.width", "value": 200}]}
+                {"matcher": {"id": "byName", "options": "hostname"}, "properties": [{"id": "custom.width", "value": 200}]},
+                {"matcher": {"id": "byName", "options": "ip_address"}, "properties": [{"id": "custom.width", "value": 150}]},
+                {"matcher": {"id": "byName", "options": "operating_system"}, "properties": [{"id": "custom.width", "value": 220}]}
             ]
         },
         "gridPos": {"h": 10, "w": 24, "x": 0, "y": 42},
@@ -614,7 +626,7 @@ def host_findings_table() -> Dict[str, Any]:
                 "datasource": datasource(),
                 "format": "table",
                 "rawSql": host_findings_query(
-                    "SELECT\n  hf.hostname,\n  hf.port,\n  hf.protocol,\n  hf.svc_name,\n  hf.severity,\n  p.plugin_name,\n  p.plugin_family,\n  FROM_UNIXTIME(hf.first_found) AS lan_dau_phat_hien,\n  FROM_UNIXTIME(hf.last_found) AS lan_cuoi_phat_hien,\n  hf.state,\n  hf.plugin_output\nFROM host_findings hf\nJOIN plugins p ON p.plugin_id = hf.plugin_id\nWHERE hf.scan_id = ${scan:raw}\n  AND hf.history_id = ${history:raw}\n  AND hf.severity IN (3, 4)\n  AND ({host_findings_filter})\n  AND (\n    {plugins_category}\n  )\nORDER BY hf.severity DESC, hf.hostname, hf.port;"
+                    "SELECT\n  COALESCE(hf.hostname, fh.hostname) AS hostname,\n  fh.ip_address,\n  fh.operating_system,\n  hf.port,\n  hf.protocol,\n  hf.svc_name,\n  hf.severity,\n  p.plugin_name,\n  p.plugin_family,\n  FROM_UNIXTIME(hf.first_found) AS lan_dau_phat_hien,\n  FROM_UNIXTIME(hf.last_found) AS lan_cuoi_phat_hien,\n  hf.state,\n  hf.plugin_output\nFROM host_findings hf\nJOIN filtered_hosts fh ON fh.scan_id = hf.scan_id AND fh.history_id = hf.history_id AND (hf.host_id = fh.host_id OR (hf.hostname IS NOT NULL AND hf.hostname = fh.hostname))\nJOIN plugins p ON p.plugin_id = hf.plugin_id\nWHERE hf.scan_id = ${scan:raw}\n  AND hf.history_id = ${history:raw}\n  AND hf.severity IN (3, 4)\n  AND ({host_findings_filter})\n  AND (\n    {plugins_category}\n  )\nORDER BY hf.severity DESC, hostname, hf.port;"
                 ),
                 "refId": "A"
             }
@@ -622,6 +634,64 @@ def host_findings_table() -> Dict[str, Any]:
         "title": "Chi tiết lỗ hổng mức cao & nghiêm trọng",
         "type": "table"
     }
+
+
+def vulnerability_detail_table() -> Dict[str, Any]:
+    return {
+        "datasource": datasource(),
+        "description": "Bảng tổng hợp đầy đủ mô tả, giải pháp, điểm số và tham chiếu của từng lỗ hổng theo máy chủ.",
+        "fieldConfig": {
+            "defaults": {
+                "custom": {"align": "auto", "cellOptions": {"type": "auto"}},
+                "mappings": [
+                    {
+                        "options": {
+                            "4": {"color": "#E74C3C", "index": 0, "text": "Nghiêm trọng"},
+                            "3": {"color": "#E67E22", "index": 1, "text": "Cao"},
+                            "2": {"color": "#F1C40F", "index": 2, "text": "Trung bình"},
+                            "1": {"color": "#3498DB", "index": 3, "text": "Thấp"},
+                            "0": {"color": "#95A5A6", "index": 4, "text": "Thông tin"}
+                        },
+                        "type": "value"
+                    }
+                ],
+                "thresholds": {"mode": "absolute", "steps": [{"color": "#E74C3C", "value": 4}]}
+            },
+            "overrides": [
+                {"matcher": {"id": "byName", "options": "hostname"}, "properties": [{"id": "custom.width", "value": 160}]},
+                {"matcher": {"id": "byName", "options": "ip_address"}, "properties": [{"id": "custom.width", "value": 140}]},
+                {"matcher": {"id": "byName", "options": "operating_system"}, "properties": [{"id": "custom.width", "value": 200}]},
+                {"matcher": {"id": "byName", "options": "plugin_name"}, "properties": [{"id": "custom.width", "value": 240}]},
+                {"matcher": {"id": "byName", "options": "synopsis"}, "properties": [{"id": "custom.width", "value": 260}]},
+                {"matcher": {"id": "byName", "options": "description"}, "properties": [{"id": "custom.width", "value": 320}]},
+                {"matcher": {"id": "byName", "options": "solution"}, "properties": [{"id": "custom.width", "value": 260}]},
+                {"matcher": {"id": "byName", "options": "see_also"}, "properties": [{"id": "custom.width", "value": 220}]},
+                {"matcher": {"id": "byName", "options": "plugin_output"}, "properties": [{"id": "custom.width", "value": 320}]},
+                {"matcher": {"id": "byName", "options": "vpr_drivers"}, "properties": [{"id": "custom.width", "value": 220}]}
+            ]
+        },
+        "gridPos": {"h": 14, "w": 24, "x": 0, "y": 53},
+        "id": 17,
+        "options": {
+            "cellHeight": "sm",
+            "footer": {"countRows": False, "fields": "", "reducer": [], "show": False},
+            "showHeader": True,
+            "sortBy": [{"desc": True, "displayName": "severity"}]
+        },
+        "targets": [
+            {
+                "datasource": datasource(),
+                "format": "table",
+                "rawSql": host_findings_query(
+                    "SELECT\n  COALESCE(hf.hostname, fh.hostname) AS hostname,\n  fh.ip_address,\n  fh.operating_system,\n  hf.severity,\n  hf.plugin_id,\n  MAX(p.plugin_name) AS plugin_name,\n  MAX(p.plugin_family) AS plugin_family,\n  MAX(p.plugin_type) AS plugin_type,\n  MAX(p.plugin_version) AS plugin_version,\n  MAX(p.risk_factor) AS risk_factor,\n  ROUND(MAX(agg.vpr_score), 2) AS vpr_score,\n  ROUND(MAX(agg.epss_score), 4) AS epss_score,\n  MAX(p.cvss2_base_score) AS cvss2_base_score,\n  MAX(p.cvss2_vector) AS cvss2_vector,\n  MAX(p.cvss3_base_score) AS cvss3_base_score,\n  MAX(p.cvss3_vector) AS cvss3_vector,\n  FROM_UNIXTIME(MAX(p.plugin_publication_date)) AS plugin_phat_hanh,\n  FROM_UNIXTIME(MAX(p.plugin_modification_date)) AS plugin_cap_nhat,\n  FROM_UNIXTIME(MAX(p.vulnerability_publication_date)) AS lo_hong_cong_bo,\n  MAX(p.synopsis) AS synopsis,\n  MAX(p.description) AS description,\n  MAX(p.solution) AS solution,\n  MAX(p.see_also) AS see_also,\n  MAX(p.cwe) AS cwe,\n  MAX(agg.cve_lien_quan) AS cve_lien_quan,\n  MAX(p.vpr_drivers) AS vpr_drivers,\n  hf.port,\n  hf.protocol,\n  hf.svc_name,\n  hf.plugin_output\nFROM host_findings hf\nJOIN filtered_hosts fh ON fh.scan_id = hf.scan_id AND fh.history_id = hf.history_id AND (hf.host_id = fh.host_id OR (hf.hostname IS NOT NULL AND hf.hostname = fh.hostname))\nJOIN plugins p ON p.plugin_id = hf.plugin_id\nLEFT JOIN (\n  SELECT\n    f.scan_id,\n    f.history_id,\n    f.plugin_id,\n    MAX(f.vpr_score) AS vpr_score,\n    MAX(f.epss_score) AS epss_score,\n    GROUP_CONCAT(DISTINCT fc.cve_id ORDER BY fc.cve_id SEPARATOR '; ') AS cve_lien_quan\n  FROM findings f\n  LEFT JOIN finding_cves fc ON fc.finding_id = f.id\n  WHERE f.hostname IS NULL\n  GROUP BY f.scan_id, f.history_id, f.plugin_id\n) agg ON agg.scan_id = hf.scan_id AND agg.history_id = hf.history_id AND agg.plugin_id = hf.plugin_id\nWHERE hf.scan_id = ${scan:raw}\n  AND hf.history_id = ${history:raw}\n  AND ({host_findings_filter})\n  AND (\n    {plugins_category}\n  )\nGROUP BY hostname, fh.ip_address, fh.operating_system, hf.severity, hf.plugin_id, hf.port, hf.protocol, hf.svc_name, hf.plugin_output\nORDER BY hf.severity DESC, hostname, hf.plugin_id, hf.port\nLIMIT 300;"
+                ),
+                "refId": "A"
+            }
+        ],
+        "title": "Thông tin chi tiết từng lỗ hổng",
+        "type": "table"
+    }
+
 
 def build_panels() -> List[Dict[str, Any]]:
     panels: List[Dict[str, Any]] = []
@@ -635,7 +705,8 @@ def build_panels() -> List[Dict[str, Any]]:
     panels.extend([host_table(), host_priority_chart()])
     panels.append(row_panel(104, "Chi tiết lỗ hổng & CVE", 33))
     panels.extend([plugin_table(), cve_table(), host_findings_table()])
-    panels.append(row_panel(105, "", 52))
+    panels.append(row_panel(105, "Thông tin chi tiết từng lỗ hổng", 52))
+    panels.append(vulnerability_detail_table())
     return panels
 
 
@@ -732,6 +803,40 @@ def build_dashboard() -> Dict[str, Any]:
                     "name": "host",
                     "options": [],
                     "query": "SELECT DISTINCT hostname AS __text, hostname AS __value FROM hosts WHERE scan_id=${scan:raw} AND history_id=${history:raw} ORDER BY hostname;",
+                    "refresh": 1,
+                    "regex": "",
+                    "skipUrlSync": False,
+                    "sort": 0,
+                    "type": "query"
+                },
+                {
+                    "current": {},
+                    "datasource": datasource(),
+                    "definition": "",
+                    "hide": 0,
+                    "includeAll": True,
+                    "label": "Địa chỉ IP",
+                    "multi": True,
+                    "name": "ip",
+                    "options": [],
+                    "query": "SELECT DISTINCT ip_address AS __text, ip_address AS __value FROM hosts WHERE scan_id=${scan:raw} AND history_id=${history:raw} AND ip_address IS NOT NULL AND ip_address <> '' ORDER BY ip_address;",
+                    "refresh": 1,
+                    "regex": "",
+                    "skipUrlSync": False,
+                    "sort": 0,
+                    "type": "query"
+                },
+                {
+                    "current": {},
+                    "datasource": datasource(),
+                    "definition": "",
+                    "hide": 0,
+                    "includeAll": True,
+                    "label": "Hệ điều hành",
+                    "multi": True,
+                    "name": "os_filter",
+                    "options": [],
+                    "query": "SELECT DISTINCT operating_system AS __text, operating_system AS __value FROM hosts WHERE scan_id=${scan:raw} AND history_id=${history:raw} AND operating_system IS NOT NULL AND operating_system <> '' ORDER BY operating_system;",
                     "refresh": 1,
                     "regex": "",
                     "skipUrlSync": False,

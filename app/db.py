@@ -1,4 +1,5 @@
 import os
+import json
 import hashlib
 import mysql.connector
 from contextlib import contextmanager
@@ -96,6 +97,62 @@ def _coerce_int(value: Any, default: int = 0) -> int:
             return default
 
 
+def _coerce_optional_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+
+def _coerce_optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_to_string(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, (list, tuple, set)):
+        parts = []
+        for item in value:
+            if item is None:
+                continue
+            if isinstance(item, str):
+                item_text = item.strip()
+                if item_text:
+                    parts.append(item_text)
+            else:
+                parts.append(str(item))
+        if parts:
+            return "; ".join(parts)
+        return None
+    return str(value)
+
+
 def _extract_count(host: dict, *keys: str) -> int:
     for key in keys:
         if key in host:
@@ -128,6 +185,26 @@ def upsert_host_record(cn, scan_id: int, history_id: int, host: dict):
         )
     )
 
+    ip_address = _first_present(
+        (
+            host.get("ip_address"),
+            host.get("ip"),
+            host.get("host-ip"),
+            host.get("ipv4"),
+            host.get("host-ipv4"),
+            host.get("ipaddress"),
+        )
+    )
+
+    operating_system = _first_present(
+        (
+            host.get("operating_system"),
+            host.get("operating-system"),
+            host.get("os"),
+            host.get("system_type"),
+        )
+    )
+
     critical = _extract_count(host, "critical", "critical_count", "severity_critical")
     high = _extract_count(host, "high", "high_count", "severity_high")
     medium = _extract_count(host, "medium", "medium_count", "severity_medium")
@@ -136,16 +213,27 @@ def upsert_host_record(cn, scan_id: int, history_id: int, host: dict):
 
     cur = cn.cursor()
     cur.execute("""
-        INSERT INTO hosts (scan_id, history_id, host_id, hostname, critical, high, medium, low, info)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        INSERT INTO hosts (
+          scan_id, history_id, host_id, hostname, ip_address, operating_system,
+          critical, high, medium, low, info
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON DUPLICATE KEY UPDATE
-          hostname=VALUES(hostname), critical=VALUES(critical), high=VALUES(high),
-          medium=VALUES(medium), low=VALUES(low), info=VALUES(info)
+          hostname=VALUES(hostname),
+          ip_address=VALUES(ip_address),
+          operating_system=VALUES(operating_system),
+          critical=VALUES(critical),
+          high=VALUES(high),
+          medium=VALUES(medium),
+          low=VALUES(low),
+          info=VALUES(info)
     """, (
         scan_id,
         history_id,
         host_id,
         hostname,
+        ip_address,
+        operating_system,
         critical,
         high,
         medium,
@@ -168,6 +256,40 @@ def import_plugins_and_findings(cn, scan_id, history_id, vuln_items):
         plugin_id = int(plugin_id)
         plugin_name = v.get("plugin_name") or ""
         plugin_family = v.get("plugin_family") or ""
+        plugin_type = _first_present((v.get("plugin_type"), v.get("type")))
+        plugin_version = _first_present((v.get("plugin_version"), v.get("version")))
+        risk_factor = _first_present((v.get("risk_factor"), v.get("riskfactor")))
+        synopsis = _normalize_to_string(v.get("synopsis"))
+        description = _normalize_to_string(v.get("description"))
+        solution = _normalize_to_string(v.get("solution"))
+        see_also = _normalize_to_string(
+            _first_present((v.get("see_also"), v.get("seealso"), v.get("see also")))
+        )
+        plugin_publication_date = _coerce_optional_int(
+            _first_present((v.get("plugin_publication_date"), v.get("publication_date")))
+        )
+        plugin_modification_date = _coerce_optional_int(
+            _first_present((v.get("plugin_modification_date"), v.get("modification_date")))
+        )
+        vulnerability_publication_date = _coerce_optional_int(
+            _first_present((v.get("vulnerability_publication_date"), v.get("vuln_publication_date")))
+        )
+        cwe = _normalize_to_string(v.get("cwe"))
+        cvss2_base_score = _coerce_optional_float(
+            _first_present((v.get("cvss_base_score"), v.get("cvss2_base_score")))
+        )
+        cvss2_vector = _normalize_to_string(
+            _first_present((v.get("cvss_vector"), v.get("cvss2_vector")))
+        )
+        cvss3_base_score = _coerce_optional_float(
+            _first_present((v.get("cvss3_base_score"), v.get("cvssv3_base_score")))
+        )
+        cvss3_vector = _normalize_to_string(
+            _first_present((v.get("cvss3_vector"), v.get("cvssv3_vector")))
+        )
+        vpr_drivers_raw = v.get("vpr_drivers") or v.get("vpr_key_drivers")
+        vpr_drivers = json.dumps(vpr_drivers_raw, ensure_ascii=False) if vpr_drivers_raw else None
+
         severity = int(v.get("severity", 0))
         count = int(v.get("count", 0))
         cpe = v.get("cpe")
@@ -179,11 +301,53 @@ def import_plugins_and_findings(cn, scan_id, history_id, vuln_items):
 
         # upsert plugin
         cur.execute("""
-            INSERT INTO plugins (plugin_id, plugin_name, plugin_family)
-            VALUES (%s,%s,%s)
+            INSERT INTO plugins (
+              plugin_id, plugin_name, plugin_family, plugin_type, plugin_version, risk_factor,
+              synopsis, description, solution, see_also,
+              plugin_publication_date, plugin_modification_date, vulnerability_publication_date,
+              cwe, cvss2_base_score, cvss2_vector, cvss3_base_score, cvss3_vector, vpr_drivers
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON DUPLICATE KEY UPDATE
-              plugin_name=VALUES(plugin_name), plugin_family=VALUES(plugin_family)
-        """, (plugin_id, plugin_name, plugin_family))
+              plugin_name=VALUES(plugin_name),
+              plugin_family=VALUES(plugin_family),
+              plugin_type=VALUES(plugin_type),
+              plugin_version=VALUES(plugin_version),
+              risk_factor=VALUES(risk_factor),
+              synopsis=VALUES(synopsis),
+              description=VALUES(description),
+              solution=VALUES(solution),
+              see_also=VALUES(see_also),
+              plugin_publication_date=VALUES(plugin_publication_date),
+              plugin_modification_date=VALUES(plugin_modification_date),
+              vulnerability_publication_date=VALUES(vulnerability_publication_date),
+              cwe=VALUES(cwe),
+              cvss2_base_score=VALUES(cvss2_base_score),
+              cvss2_vector=VALUES(cvss2_vector),
+              cvss3_base_score=VALUES(cvss3_base_score),
+              cvss3_vector=VALUES(cvss3_vector),
+              vpr_drivers=VALUES(vpr_drivers)
+        """, (
+            plugin_id,
+            plugin_name,
+            plugin_family,
+            plugin_type,
+            plugin_version,
+            risk_factor,
+            synopsis,
+            description,
+            solution,
+            see_also,
+            plugin_publication_date,
+            plugin_modification_date,
+            vulnerability_publication_date,
+            cwe,
+            cvss2_base_score,
+            cvss2_vector,
+            cvss3_base_score,
+            cvss3_vector,
+            vpr_drivers,
+        ))
 
         # upsert finding (aggregate by plugin, hostname NULL)
         cur.execute("""
